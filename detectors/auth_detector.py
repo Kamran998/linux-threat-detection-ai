@@ -15,20 +15,27 @@ STATE_DIR = Path("state")
 DEFAULT_STATE_FILE = STATE_DIR / "auth.state.json"
 ALERT_LOG = "logs/alerts.log"
 
-# --- Regex patterns ---
+# --- SSH patterns ---
 RE_SSH_FAIL = re.compile(r"(Failed password|authentication failure|Invalid user)", re.IGNORECASE)
 RE_SSH_ACCEPT = re.compile(r"(Accepted password|Accepted publickey)", re.IGNORECASE)
 
-# Extract "from <ip>" (IPv4/IPv6-ish)
 RE_FROM_IP = re.compile(r"\bfrom\s+([0-9a-fA-F\.:]+)\b")
-
-# Extract username from common sshd failed formats:
-# "Failed password for invalid user bob from 1.2.3.4 ..."
-# "Failed password for bob from 1.2.3.4 ..."
 RE_FAIL_USER = re.compile(r"Failed password for (?:invalid user )?(\S+)\s+from\s+", re.IGNORECASE)
 
-# Track sudo usage (still useful)
-RE_SUDO = re.compile(r"\bsudo\b", re.IGNORECASE)
+# --- Privileged / account management signals ---
+USER_MGMT_WORDS = ("useradd", "usermod", "userdel", "passwd", "chage")
+RE_USER_MGMT_MSG = re.compile(r"\b(useradd|usermod|userdel|passwd|chage)\b", re.IGNORECASE)
+RE_SUDOERS = re.compile(r"(/etc/sudoers\b|/etc/sudoers\.d/)", re.IGNORECASE)
+
+# Classic sudo command log:
+# "sudo:  kamran : TTY=pts/0 ; PWD=/home/kamran ; USER=root ; COMMAND=/usr/bin/id"
+RE_SUDO_CMDLINE = re.compile(r"^sudo:\s*(?P<user>\S+)\s*:\s*(?P<rest>.*)", re.IGNORECASE)
+RE_SUDO_COMMAND = re.compile(r"\bCOMMAND=(.*)$", re.IGNORECASE)
+
+# PAM sudo session lines (these are not the command itself):
+# "pam_unix(sudo:session): session opened for user root(uid=0) by kamran(uid=1000)"
+RE_PAM_SUDO_SESSION = re.compile(r"pam_unix\(sudo:session\):\s*session\s+(opened|closed)", re.IGNORECASE)
+RE_PAM_BY_USER = re.compile(r"\bby\s+(\S+)\(uid=", re.IGNORECASE)
 
 
 def utc_ts() -> str:
@@ -50,10 +57,6 @@ def save_state(path: Path, state: Dict[str, Any]) -> None:
 
 
 def _entry_epoch_seconds(e: Dict[str, Any]) -> float:
-    """
-    journal timestamps are strings; __REALTIME_TIMESTAMP is microseconds since epoch.
-    Fallback to current time if missing.
-    """
     ts_us = e.get("__REALTIME_TIMESTAMP") or e.get("_SOURCE_REALTIME_TIMESTAMP")
     try:
         if isinstance(ts_us, str) and ts_us.isdigit():
@@ -64,12 +67,9 @@ def _entry_epoch_seconds(e: Dict[str, Any]) -> float:
 
 
 def run_journalctl(unit: Optional[str], cursor: Optional[str], since: Optional[str], limit: int) -> Dict[str, Any]:
-    """
-    Returns dict with keys: entries (list), new_cursor (str|None), stderr (str)
-    Uses journalctl JSON output and advances cursor using __CURSOR.
-    """
     cmd: List[str] = ["journalctl", "-q", "-o", "json", "--no-pager", "-n", str(limit)]
 
+    # Only pass -u when unit is a real non-empty string
     if unit:
         cmd += ["-u", unit]
 
@@ -79,7 +79,6 @@ def run_journalctl(unit: Optional[str], cursor: Optional[str], since: Optional[s
         cmd += ["--since", since]
 
     proc = subprocess.run(cmd, text=True, capture_output=True)
-
     if proc.returncode != 0:
         raise RuntimeError(proc.stderr.strip() or "journalctl failed")
 
@@ -111,12 +110,6 @@ def extract_message(e: Dict[str, Any]) -> str:
 
 # ---------------- Brute force tracker ----------------
 class BruteForceTracker:
-    """
-    Sliding window per IP:
-      - store failure timestamps
-      - emit a single high-severity alert when threshold reached
-      - cooldown to avoid repeated alerts for same IP
-    """
     def __init__(self, threshold: int = 5, window_sec: int = 120, cooldown_sec: int = 300):
         self.threshold = threshold
         self.window_sec = window_sec
@@ -134,17 +127,14 @@ class BruteForceTracker:
             self.usernames[ip].add(username)
         self.sample_msgs[ip].append(message)
 
-        # prune outside window
         cutoff = ts - self.window_sec
         while dq and dq[0] < cutoff:
             dq.popleft()
 
-        # cooldown check
         last = self.last_alert_ts.get(ip, 0.0)
         if (ts - last) < self.cooldown_sec:
             return False
 
-        # threshold reached?
         if len(dq) >= self.threshold:
             self.last_alert_ts[ip] = ts
             return True
@@ -162,7 +152,6 @@ class BruteForceTracker:
         }
 
 
-# Global tracker used by detect_events()
 BF_TRACKER = BruteForceTracker(threshold=5, window_sec=120, cooldown_sec=300)
 
 
@@ -181,6 +170,18 @@ def _parse_ip_and_user(msg: str) -> Tuple[Optional[str], Optional[str]]:
     return ip, user
 
 
+def _is_user_mgmt_event(ident: str, msg: str) -> bool:
+    ident_l = (ident or "").lower()
+    if ident_l in USER_MGMT_WORDS:
+        return True
+    # sometimes identifier looks like "useradd" already, or message contains it
+    if any(w in ident_l for w in USER_MGMT_WORDS):
+        return True
+    if RE_USER_MGMT_MSG.search(msg):
+        return True
+    return False
+
+
 def detect_events(entries: List[Dict[str, Any]], unit: str) -> int:
     count = 0
 
@@ -190,7 +191,7 @@ def detect_events(entries: List[Dict[str, Any]], unit: str) -> int:
 
         host = e.get("_HOSTNAME")
         pid = e.get("_PID")
-        ident = e.get("SYSLOG_IDENTIFIER") or unit
+        ident = e.get("SYSLOG_IDENTIFIER") or (unit or "")
         ts_epoch = _entry_epoch_seconds(e)
 
         # --- SSH failures ---
@@ -216,7 +217,6 @@ def detect_events(entries: List[Dict[str, Any]], unit: str) -> int:
             )
             count += 1
 
-            # Brute force detection (only if we got an IP)
             if ip:
                 should_alert = BF_TRACKER.observe_failure(ip=ip, ts=ts_epoch, username=user, message=msg)
                 if should_alert:
@@ -260,13 +260,69 @@ def detect_events(entries: List[Dict[str, Any]], unit: str) -> int:
             )
             count += 1
 
-        # --- Sudo usage ---
-        elif RE_SUDO.search(msg) and "sudo:" in msg_l:
+        # --- Classic sudo command line (best signal; includes COMMAND=...) ---
+        elif msg_l.startswith("sudo:"):
+            m = RE_SUDO_CMDLINE.search(msg)
+            actor = ""
+            command = ""
+            if m:
+                actor = m.groupdict().get("user") or ""
+                rest = m.groupdict().get("rest") or ""
+                m2 = RE_SUDO_COMMAND.search(rest)
+                if m2:
+                    command = (m2.group(1) or "").strip()
+
             emit_alert(
                 event_type="sudo_used",
                 severity="medium",
                 source="auth",
-                summary="Sudo command usage detected",
+                summary="Sudo command execution detected",
+                details={
+                    "unit": unit,
+                    "identifier": ident,
+                    "pid": pid,
+                    "host": host,
+                    "actor": actor,
+                    "command": command,
+                    "message": msg,
+                },
+                alert_log=ALERT_LOG,
+                tags=["sudo", "privilege", "command_exec"],
+            )
+            count += 1
+
+        # --- PAM sudo session open/close (lower signal; no command) ---
+        elif RE_PAM_SUDO_SESSION.search(msg):
+            by_user = ""
+            m = RE_PAM_BY_USER.search(msg)
+            if m:
+                by_user = m.group(1)
+
+            emit_alert(
+                event_type="sudo_session",
+                severity="low",
+                source="auth",
+                summary="Sudo session open/close detected",
+                details={
+                    "unit": unit,
+                    "identifier": ident,
+                    "pid": pid,
+                    "host": host,
+                    "actor": by_user,
+                    "message": msg,
+                },
+                alert_log=ALERT_LOG,
+                tags=["sudo", "privilege", "session"],
+            )
+            count += 1
+
+        # --- User/account management ---
+        elif _is_user_mgmt_event(ident, msg):
+            emit_alert(
+                event_type="account_change",
+                severity="high",
+                source="auth",
+                summary="User/account management activity detected",
                 details={
                     "unit": unit,
                     "identifier": ident,
@@ -275,7 +331,26 @@ def detect_events(entries: List[Dict[str, Any]], unit: str) -> int:
                     "message": msg,
                 },
                 alert_log=ALERT_LOG,
-                tags=["sudo", "privilege"],
+                tags=["account", "user_mgmt", "privilege"],
+            )
+            count += 1
+
+        # --- Sudoers modification indicators ---
+        elif RE_SUDOERS.search(msg):
+            emit_alert(
+                event_type="sudoers_modified",
+                severity="high",
+                source="auth",
+                summary="Possible sudoers configuration change detected",
+                details={
+                    "unit": unit,
+                    "identifier": ident,
+                    "pid": pid,
+                    "host": host,
+                    "message": msg,
+                },
+                alert_log=ALERT_LOG,
+                tags=["sudoers", "privilege", "config_change"],
             )
             count += 1
 
@@ -284,21 +359,20 @@ def detect_events(entries: List[Dict[str, Any]], unit: str) -> int:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--unit", default="sshd", help="systemd unit to read (default: sshd)")
+    ap.add_argument("--unit", default="sshd",
+                    help="systemd unit to read (default: sshd). Use empty string to read all logs.")
     ap.add_argument("--state-file", default=str(DEFAULT_STATE_FILE), help="state file to store journal cursor")
     ap.add_argument("--since", default="10 minutes ago", help="used only on first run when no cursor exists")
     ap.add_argument("--limit", type=int, default=200, help="max journal lines per run")
     ap.add_argument("--once", action="store_true", help="run once and exit")
     ap.add_argument("--interval", type=int, default=10, help="seconds between runs")
 
-    # brute-force tuning
-    ap.add_argument("--bf-threshold", type=int, default=5, help="failures to trigger bruteforce suspected")
-    ap.add_argument("--bf-window", type=int, default=120, help="time window in seconds for brute-force counting")
-    ap.add_argument("--bf-cooldown", type=int, default=300, help="cooldown seconds between bruteforce alerts per IP")
+    ap.add_argument("--bf-threshold", type=int, default=5)
+    ap.add_argument("--bf-window", type=int, default=120)
+    ap.add_argument("--bf-cooldown", type=int, default=300)
 
     args = ap.parse_args()
 
-    # Apply CLI tuning to the global tracker
     BF_TRACKER.threshold = args.bf_threshold
     BF_TRACKER.window_sec = args.bf_window
     BF_TRACKER.cooldown_sec = args.bf_cooldown
@@ -306,15 +380,20 @@ def main():
     Path("logs").mkdir(exist_ok=True)
     state_path = Path(args.state_file)
 
+    # Treat "" as None for journalctl -u
+    unit = args.unit.strip() if isinstance(args.unit, str) else args.unit
+    if unit == "":
+        unit = None
+
     while True:
         state = load_state(state_path)
         cursor = state.get("cursor")
 
-        res = run_journalctl(unit=args.unit, cursor=cursor, since=args.since, limit=args.limit)
+        res = run_journalctl(unit=unit, cursor=cursor, since=args.since, limit=args.limit)
         entries = res["entries"]
         new_cursor = res["new_cursor"]
 
-        emitted = detect_events(entries, args.unit)
+        emitted = detect_events(entries, unit or "")
 
         if new_cursor:
             save_state(state_path, {"cursor": new_cursor, "ts": utc_ts()})
@@ -322,7 +401,7 @@ def main():
         print(json.dumps({
             "ts": utc_ts(),
             "component": "auth_detector",
-            "unit": args.unit,
+            "unit": (unit or ""),
             "entries_read": len(entries),
             "alerts_emitted": emitted,
             "cursor_set": bool(new_cursor),
