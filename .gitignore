@@ -1,0 +1,8 @@
+# runtime outputs
+logs/
+state/
+
+# python caches
+__pycache__/
+*.pyc
+*.pyo
