@@ -1,10 +1,11 @@
 [Unit]
-Description=Linux Anomaly Detection Service
+Description=Linux Threat Detection Agent (ML + Auth)
+After=network.target
 
 [Service]
 Type=simple
 WorkingDirectory=/home/kamran/linux-threat-detection-ai
-ExecStart=/usr/bin/python3 -m model.detect_anomalies
+ExecStart=/usr/bin/python3 -m engine.run_detection --interval 10 --ml-threshold -0.70 --auth-unit sshd --auth-since "5 minutes ago"
 Restart=always
 RestartSec=3
 
