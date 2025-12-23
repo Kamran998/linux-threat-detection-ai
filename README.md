@@ -10,6 +10,5 @@ Collects system telemetry (metrics + security signals), builds a baseline of nor
 - [ ] CI pipeline (lint/tests)
 - [ ] Hardening notes + minimal system controls
 
-## Tech
-Python, Linux (/proc), Git, GitHub Actions (later)
+
 
