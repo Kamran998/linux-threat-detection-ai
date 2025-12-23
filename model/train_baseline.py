@@ -1,34 +1,35 @@
 #!/usr/bin/env python3
-import json
-import time
+import csv
 from pathlib import Path
 import numpy as np
 import joblib
 from sklearn.ensemble import IsolationForest
-from subprocess import check_output
 
-COLLECTOR = "collector/collect_metrics.py"
-SAMPLES = 60      # 60 samples
-INTERVAL = 2      # every 2 seconds (~2 minutes total)
+DATA_PATH = "data/metrics.csv"
 MODEL_PATH = "model/baseline_model.pkl"
 
-def collect_sample():
-    out = check_output(["python3", COLLECTOR], text=True)
-    d = json.loads(out)
-    return [d["cpu_percent"], d["mem_used_kb"], d["proc_count"]]
+def load_csv(path):
+    rows = []
+    with open(path, newline="") as f:
+        reader = csv.DictReader(f)
+        for r in reader:
+            rows.append([
+                float(r["cpu_percent"]),
+                float(r["mem_used_kb"]),
+                float(r["proc_count"]),
+            ])
+    return np.array(rows)
 
 def main():
-    print(f"[+] Collecting {SAMPLES} samples...")
-    rows = []
-    for i in range(SAMPLES):
-        rows.append(collect_sample())
-        if (i + 1) % 10 == 0:
-            print(f"  collected {i+1}/{SAMPLES}")
-        time.sleep(INTERVAL)
+    if not Path(DATA_PATH).exists():
+        raise SystemExit(f"Missing dataset: {DATA_PATH}. Run the collector with --out first.")
 
-    X = np.array(rows)
+    X = load_csv(DATA_PATH)
+    if len(X) < 30:
+        raise SystemExit(f"Not enough samples to train. Need 30+, have {len(X)}.")
 
-    print("[+] Training IsolationForest baseline...")
+    print(f"[+] Training on {len(X)} samples from {DATA_PATH}")
+
     model = IsolationForest(
         n_estimators=200,
         contamination=0.05,
@@ -38,8 +39,8 @@ def main():
 
     Path("model").mkdir(exist_ok=True)
     joblib.dump(model, MODEL_PATH)
+
     print(f"[+] Saved model to {MODEL_PATH}")
 
 if __name__ == "__main__":
     main()
-
