@@ -6,6 +6,7 @@ from pathlib import Path
 import joblib
 import numpy as np
 from subprocess import check_output
+from engine.alerts import emit_alert
 
 MODEL_PATH = "model/baseline_model.pkl"
 COLLECTOR = "collector/collect_metrics.py"
@@ -53,10 +54,25 @@ def main():
         print(json.dumps(event))
 
         # Only write to alerts log if anomalous
+        # Only write to alerts log if anomalous
         if event["anomalous"]:
-            with open(ALERT_LOG, "a") as f:
-                f.write(json.dumps(event) + "\n")
-
+            emit_alert(
+                    event_type="ml_anomaly",
+                    severity="medium",
+                    source="ml",
+                    summary="IsolationForest anomaly detected in host telemetry", 
+                    details={
+                        "metrics": {
+                            "cpu_percent": raw["cpu_percent"],
+                            "mem_used_kb": raw["mem_used_kb"],
+                            "proc_count": raw["proc_count"],
+                        }
+                    },
+                    alert_log=ALERT_LOG,
+                    score=score,
+                    threshold=args.threshold,
+                    tags=["telemetry", "isolation_forest"],
+                )
         if args.once:
             break
 
