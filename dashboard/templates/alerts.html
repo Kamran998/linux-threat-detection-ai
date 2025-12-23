@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block content %}
+  <h2>Alerts</h2>
+
+  <form method="get" class="card">
+    <label>Severity: <input name="severity" value="{{ severity }}"></label>
+    <label>Source: <input name="source" value="{{ source }}"></label>
+    <label>Event Type: <input name="event_type" value="{{ event_type }}"></label>
+    <label>Search: <input name="q" value="{{ q }}"></label>
+    <button type="submit">Filter</button>
+    <div class="small">Showing up to 500 newest matching alerts.</div>
+  </form>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Time</th>
+        <th>Severity</th>
+        <th>Source</th>
+        <th>Type</th>
+        <th>Summary</th>
+        <th>Raw</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for a in rows %}
+      <tr>
+        <td>{{ a.ts }}</td>
+        <td>{{ a.severity }}</td>
+        <td>{{ a.source }}</td>
+        <td>{{ a.event_type }}</td>
+        <td>{{ a.summary }}</td>
+        <td><code>{{ a | tojson }}</code></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+{% endblock %}

@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block content %}
+  <h2>Overview</h2>
+
+  <div class="card">
+    <div>Agent Status:
+      {% if alive and health.status == "ok" %}
+        <span class="ok">ALIVE (OK)</span>
+      {% elif alive %}
+        <span class="bad">ALIVE (ERROR)</span>
+      {% else %}
+        <span class="bad">NOT REPORTING</span>
+      {% endif %}
+    </div>
+    <div class="small">Host: {{ health.host }} | Last heartbeat: {{ health.ts }}</div>
+    {% if health.last_error %}
+      <div class="small">Last error: {{ health.last_error }}</div>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <div>Alerts (last 24h): <b>{{ alerts_24h }}</b></div>
+    <div>High/Critical (last 24h): <b>{{ high_24h }}</b></div>
+    <div class="small">Last alert time: {{ last_alert_ts }}</div>
+  </div>
+
+  <div class="card">
+    <div>Next steps:</div>
+    <ul>
+      <li>Add log detectors (auth/sudo) that emit the same schema.</li>
+      <li>Add notifier for high severity alerts.</li>
+      <li>Add CI checks (ruff/pytest/bandit/pip-audit).</li>
+    </ul>
+  </div>
+{% endblock %}
