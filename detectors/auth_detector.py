@@ -13,15 +13,12 @@ STATE_DIR = Path("state")
 DEFAULT_STATE_FILE = STATE_DIR / "auth.state.json"
 ALERT_LOG = "logs/alerts.log"
 
-# Simple patterns (v1)
 RE_SSH_FAIL = re.compile(r"(Failed password|authentication failure|Invalid user)", re.IGNORECASE)
 RE_SSH_ACCEPT = re.compile(r"(Accepted password|Accepted publickey)", re.IGNORECASE)
 RE_SUDO = re.compile(r"\bsudo\b", re.IGNORECASE)
 
-
 def utc_ts() -> str:
     return datetime.utcnow().isoformat() + "Z"
-
 
 def load_state(path: Path) -> Dict[str, Any]:
     if not path.exists():
@@ -31,18 +28,17 @@ def load_state(path: Path) -> Dict[str, Any]:
     except Exception:
         return {"cursor": None}
 
-
 def save_state(path: Path, state: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(state))
 
-
 def run_journalctl(unit: Optional[str], cursor: Optional[str], since: Optional[str], limit: int) -> Dict[str, Any]:
     """
-    Returns dict with keys: entries (list), new_cursor (str|None)
+    Returns dict with keys: entries (list), new_cursor (str|None), stderr (str)
     Uses journalctl JSON output and advances cursor using __CURSOR.
     """
-    cmd: List[str] = ["journalctl", "--output=json", "--no-pager", f"-n{limit}"]
+    # IMPORTANT: use "-n", "50" not "-n50" to match your working manual command style
+    cmd: List[str] = ["journalctl", "-q", "-o", "json", "--no-pager", "-n", str(limit)]
 
     if unit:
         cmd += ["-u", unit]
@@ -53,6 +49,8 @@ def run_journalctl(unit: Optional[str], cursor: Optional[str], since: Optional[s
         cmd += ["--since", since]
 
     proc = subprocess.run(cmd, text=True, capture_output=True)
+
+    # If journalctl fails, show the real stderr
     if proc.returncode != 0:
         raise RuntimeError(proc.stderr.strip() or "journalctl failed")
 
@@ -70,10 +68,10 @@ def run_journalctl(unit: Optional[str], cursor: Optional[str], since: Optional[s
             if isinstance(c, str):
                 new_cursor = c
         except Exception:
+            # skip non-json lines safely
             continue
 
-    return {"entries": entries, "new_cursor": new_cursor}
-
+    return {"entries": entries, "new_cursor": new_cursor, "stderr": (proc.stderr or "").strip()}
 
 def extract_message(e: Dict[str, Any]) -> str:
     msg = e.get("MESSAGE")
@@ -81,14 +79,8 @@ def extract_message(e: Dict[str, Any]) -> str:
         return msg
     return json.dumps(e)
 
-
 def detect_events(entries: List[Dict[str, Any]], unit: str) -> int:
-    """
-    Emits normalized alerts for relevant auth/security signals.
-    Returns count emitted.
-    """
     count = 0
-
     for e in entries:
         msg = extract_message(e)
         msg_l = msg.lower()
@@ -153,7 +145,6 @@ def detect_events(entries: List[Dict[str, Any]], unit: str) -> int:
 
     return count
 
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--unit", default="sshd", help="systemd unit to read (default: sshd)")
@@ -165,7 +156,6 @@ def main():
     args = ap.parse_args()
 
     Path("logs").mkdir(exist_ok=True)
-
     state_path = Path(args.state_file)
 
     while True:
@@ -178,29 +168,24 @@ def main():
 
         emitted = detect_events(entries, args.unit)
 
-        # advance cursor even if no events (prevents reprocessing)
         if new_cursor:
             save_state(state_path, {"cursor": new_cursor, "ts": utc_ts()})
 
-        print(
-            json.dumps(
-                {
-                    "ts": utc_ts(),
-                    "component": "auth_detector",
-                    "unit": args.unit,
-                    "entries_read": len(entries),
-                    "alerts_emitted": emitted,
-                    "cursor_set": bool(new_cursor),
-                }
-            )
-        )
+        print(json.dumps({
+            "ts": utc_ts(),
+            "component": "auth_detector",
+            "unit": args.unit,
+            "entries_read": len(entries),
+            "alerts_emitted": emitted,
+            "cursor_set": bool(new_cursor),
+            "stderr": res.get("stderr", ""),
+        }))
 
         if args.once:
             break
 
         import time
         time.sleep(args.interval)
-
 
 if __name__ == "__main__":
     main()
