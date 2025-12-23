@@ -4,7 +4,7 @@ Description=Linux Anomaly Detection Service
 [Service]
 Type=simple
 WorkingDirectory=/home/kamran/linux-threat-detection-ai
-ExecStart=/usr/bin/python3 /home/kamran/linux-threat-detection-ai/model/detect_anomalies.py
+ExecStart=/usr/bin/python3 -m model.detect_anomalies
 Restart=always
 RestartSec=3
 
