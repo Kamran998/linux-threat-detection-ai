@@ -7,8 +7,7 @@ from pathlib import Path
 
 from engine.health import write_health
 
-# Import the two detectors as modules and call their internal logic
-# We keep this light: call each detector once per loop.
+# Import modules
 from model import detect_anomalies as ml_mod
 from detectors import auth_detector as auth_mod
 
@@ -69,6 +68,7 @@ def run_once_ml(threshold: float, alert_log: str) -> dict:
 def run_once_auth(unit: str, state_file: str, since: str, limit: int) -> dict:
     """
     Runs ONE auth log check and emits alerts for any matching entries.
+    Uses a state file to persist journal cursor.
     Returns a small status dict.
     """
     Path("logs").mkdir(exist_ok=True)
@@ -84,7 +84,7 @@ def run_once_auth(unit: str, state_file: str, since: str, limit: int) -> dict:
     emitted = auth_mod.detect_events(entries, unit)
 
     if new_cursor:
-        auth_mod.save_state(state_path, {"cursor": new_cursor, "ts": utc_ts()})
+        auth_mod.save_state(state_path, {"cursor": new_cursor, "ts": utc_ts(), "unit": unit})
 
     return {
         "unit": unit,
@@ -100,10 +100,17 @@ def main():
     ap.add_argument("--ml-threshold", type=float, default=-0.70, help="ML anomaly threshold (lower = more anomalous)")
     ap.add_argument("--alert-log", default="logs/alerts.log", help="JSONL alert log path")
 
-    ap.add_argument("--auth-unit", default="sshd", help="systemd unit for auth logs (default: sshd)")
-    ap.add_argument("--auth-state", default="state/auth.state.json", help="state file for auth cursor")
+    # Auth detector config
     ap.add_argument("--auth-since", default="5 minutes ago", help="used on first run when no cursor exists")
-    ap.add_argument("--auth-limit", type=int, default=200, help="max auth log lines per run")
+    ap.add_argument("--auth-limit", type=int, default=400, help="max auth log lines per run")
+
+    # Pass 1: sshd only
+    ap.add_argument("--auth-ssh-unit", default="sshd", help="systemd unit for SSH auth logs")
+    ap.add_argument("--auth-ssh-state", default="state/auth.sshd.state.json", help="state file for SSH cursor")
+
+    # Pass 2: global auth stream (sudo/user mgmt, etc.)
+    ap.add_argument("--auth-global-unit", default="", help="empty = system-wide auth stream")
+    ap.add_argument("--auth-global-state", default="state/auth.global.state.json", help="state file for global cursor")
 
     ap.add_argument("--once", action="store_true", help="run once and exit")
     args = ap.parse_args()
@@ -115,9 +122,17 @@ def main():
     while True:
         try:
             ml_status = run_once_ml(threshold=args.ml_threshold, alert_log=args.alert_log)
-            auth_status = run_once_auth(
-                unit=args.auth_unit,
-                state_file=args.auth_state,
+
+            auth_ssh_status = run_once_auth(
+                unit=args.auth_ssh_unit,
+                state_file=args.auth_ssh_state,
+                since=args.auth_since,
+                limit=args.auth_limit,
+            )
+
+            auth_global_status = run_once_auth(
+                unit=args.auth_global_unit,  # "" means all units
+                state_file=args.auth_global_state,
                 since=args.auth_since,
                 limit=args.auth_limit,
             )
@@ -129,7 +144,10 @@ def main():
                 "component": "runner",
                 "status": "ok",
                 "ml": ml_status,
-                "auth": auth_status,
+                "auth": {
+                    "sshd": auth_ssh_status,
+                    "global": auth_global_status,
+                },
             }))
 
         except Exception as e:
