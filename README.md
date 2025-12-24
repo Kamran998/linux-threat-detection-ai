@@ -1,14 +1,18 @@
-# Linux Threat Detection (AI-Assisted)
+# Linux Threat Detection Agent
 
-A lightweight host-based monitoring and anomaly detection project for Linux.  
-Collects system telemetry (metrics + security signals), builds a baseline of normal behavior, and flags anomalies using unsupervised ML.
+A lightweight Linux host-based threat detection agent built with Python.
 
-## Current Status
-- [x] Metrics collector (CPU, memory, process count)
-- [ ] Baseline training
-- [ ] Anomaly detection + alert logging
-- [ ] CI pipeline (lint/tests)
-- [ ] Hardening notes + minimal system controls
+The agent monitors system activity and authentication logs, detects anomalous behavior using unsupervised machine learning, and generates structured security alerts.
 
+## Features
+- Host telemetry collection (CPU, memory, process count)
+- Unsupervised anomaly detection (Isolation Forest)
+- SSH authentication monitoring and brute-force detection
+- Sudo usage and account change detection
+- JSON-based alert logging
+- systemd user service for continuous operation
+
+## Status
+This project is a functional prototype intended for learning, research, and portfolio demonstration.
 
 
