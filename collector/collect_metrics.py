@@ -11,7 +11,7 @@ def read_proc_stat():
     with open("/proc/stat", "r") as f:
         line = f.readline()
     parts = line.split()
-    values = list(map(int, parts[1:8]))  # user nice system idle iowait irq softirq
+    values = list(map(int, parts[1:8]))  
     return values
 
 def cpu_percent(interval=0.5):
